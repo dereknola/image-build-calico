@@ -35,11 +35,10 @@ TAG := $(shell cat TAG)$(BUILD_META)
 endif
 
 REPO ?= rancher
-IMAGE_NAME = hardened-calico
-REGISTRY_IMAGE = $(REPO)/$(IMAGE_NAME)
-IMAGE = $(REGISTRY_IMAGE):$(TAG)
-
-METADATA_FILE ?= $(BUILDDIR)/$(subst /,-,$(REGISTRY_IMAGE))-$(ARCH).metadata.json
+CALICO_IMAGE = $(REPO)/hardened-calico:$(TAG)
+CALICO_NODE_IMAGE = $(REPO)/hardened-calico-node:$(TAG)
+CALICO_METADATA_FILE = $(BUILDDIR)/$(subst /,-,$(REPO)/hardened-calico)-$(ARCH).metadata.json
+CALICO_NODE_METADATA_FILE = $(BUILDDIR)/$(subst /,-,$(REPO)/hardened-calico-node)-$(ARCH).metadata.json
 
 LABEL_ARGS = $(foreach label,$(META_LABELS),--label $(label))
 
@@ -47,67 +46,109 @@ ifeq (,$(filter %$(BUILD_META),$(TAG)))
 $(error TAG $(TAG) needs to end with build metadata: $(BUILD_META))
 endif
 
-$(BUILDDIR):
-	mkdir $(BUILDDIR)
-
 buildx-machine:
 	docker buildx inspect $(MACHINE) > /dev/null 2>&1 || \
 		docker buildx create --name=$(MACHINE) --platform=linux/arm64,linux/amd64
 
-.PHONY: image-build
-image-build:
+.PHONY: image-build-calico
+image-build-calico:
 	docker buildx build --no-cache \
 		--platform=$(ARCH) \
 		--pull \
+		--target calico_image \
 		--build-arg TAG=$(TAG:$(BUILD_META)=) \
 		--build-arg K3S_ROOT_VERSION=$(K3S_ROOT_VERSION) \
-		--tag $(IMAGE) \
-		--tag $(IMAGE)-$(ARCH) \
+		--tag $(CALICO_IMAGE) \
 		--load \
 		.
 
-.PHONY: push-image
-push-image: $(BUILDDIR) | buildx-machine
+.PHONY: image-build-calico-node
+image-build-calico-node:
+	docker buildx build --no-cache \
+		--platform=$(ARCH) \
+		--pull \
+		--target calico_node_image \
+		--build-arg TAG=$(TAG:$(BUILD_META)=) \
+		--build-arg K3S_ROOT_VERSION=$(K3S_ROOT_VERSION) \
+		--tag $(CALICO_NODE_IMAGE) \
+		--load \
+		.
+
+.PHONY: image-build
+image-build: image-build-calico image-build-calico-node
+
+.PHONY: image-push-calico
+image-push-calico: $(BUILDDIR) | buildx-machine
 	docker buildx build \
 		--builder=$(MACHINE) \
 		$(IID_FILE_FLAG) \
 		--sbom=true \
 		--attest type=provenance,mode=max \
 		--platform=$(TARGET_PLATFORMS) \
+		--target calico_image \
 		--build-arg TAG=$(TAG:$(BUILD_META)=) \
 		--build-arg K3S_ROOT_VERSION=$(K3S_ROOT_VERSION) \
-		--output type=image,name=$(REGISTRY_IMAGE),push-by-digest=true,name-canonical=true,push=true \
+		--output type=image,name=$(CALICO_IMAGE),push-by-digest=true,name-canonical=true,push=true \
 		$(LABEL_ARGS) \
 		--push \
-		--metadata-file $(METADATA_FILE) \
+		--metadata-file $(CALICO_METADATA_FILE) \
 		.
 
+.PHONY: image-push-calico-node
+image-push-calico-node: $(BUILDDIR) | buildx-machine
+	docker buildx build \
+		--builder=$(MACHINE) \
+		$(IID_FILE_FLAG) \
+		--sbom=true \
+		--attest type=provenance,mode=max \
+		--platform=$(TARGET_PLATFORMS) \
+		--target calico_node_image \
+		--build-arg TAG=$(TAG:$(BUILD_META)=) \
+		--build-arg K3S_ROOT_VERSION=$(K3S_ROOT_VERSION) \
+		--output type=image,name=$(CALICO_NODE_IMAGE),push-by-digest=true,name-canonical=true,push=true \
+		$(LABEL_ARGS) \
+		--push \
+		--metadata-file $(CALICO_NODE_METADATA_FILE) \
+		.
+
+.PHONY: image-push
+image-push: image-push-calico image-push-calico-node
+
+.PHONY: manifest-push-calico
+manifest-push-calico: | buildx-machine
+	d=""; \
+	for architecture in $(MULTI_ARCH); do \
+		metadata_file=$(BUILDDIR)/$(subst /,-,$(REPO)/hardened-calico)-$$architecture.metadata.json; \
+		d="$$d $$(jq -r '.["containerimage.digest"]' $$metadata_file)"; \
+	done; \
+	docker buildx imagetools create \
+		--builder=$(MACHINE) \
+		-t $(CALICO_IMAGE) -t $(REPO)/hardened-calico:latest \
+		$$d
+
+.PHONY: manifest-push-calico-node
+manifest-push-calico-node: | buildx-machine
+	d=""; \
+	for architecture in $(MULTI_ARCH); do \
+		metadata_file=$(BUILDDIR)/$(subst /,-,$(REPO)/hardened-calico-node)-$$architecture.metadata.json; \
+		d="$$d $$(jq -r '.["containerimage.digest"]' $$metadata_file)"; \
+	done; \
+	docker buildx imagetools create \
+		--builder=$(MACHINE) \
+		-t $(CALICO_NODE_IMAGE) -t $(REPO)/hardened-calico-node:latest \
+		$$d
+
 .PHONY: manifest-push
-manifest-push: $(BUILDDIR) | buildx-machine
-	if [ -n "$(MULTI_ARCH)" ]; then \
-		d=""; \
-		for a in $(MULTI_ARCH); do \
-			f=$(BUILDDIR)/$(subst /,-,$(REGISTRY_IMAGE))-$$a.metadata.json; \
-			d="$$d $$(jq -r '.["containerimage.digest"]' $$f)"; \
-		done; \
-		docker buildx imagetools create \
-			--builder=$(MACHINE) \
-			-t $(IMAGE) -t $(REGISTRY_IMAGE):latest \
-			$$d; \
-	else \
-		docker buildx imagetools create \
-			--builder=$(MACHINE) \
-			-t $(IMAGE) -t $(REGISTRY_IMAGE):latest \
-			$$(jq -r '.["containerimage.digest"]' $(METADATA_FILE)); \
-	fi
+manifest-push: manifest-push-calico manifest-push-calico-node
 
 ifneq ($(strip $(IID_FILE_PATH)),)
-	docker buildx imagetools inspect --format "{{json .Manifest}}" $(IMAGE) | jq -r '.digest' > "$(IID_FILE_PATH)"
+	docker buildx imagetools inspect --format "{{json .Manifest}}" $(CALICO_IMAGE) | jq -r '.digest' > "$(IID_FILE_PATH)"
 endif
 
 .PHONY: image-scan
 image-scan:
-	trivy image --severity $(SEVERITIES) --no-progress --ignore-unfixed $(IMAGE)
+	trivy image --severity $(SEVERITIES) --no-progress --ignore-unfixed $(CALICO_IMAGE)
+	trivy image --severity $(SEVERITIES) --no-progress --ignore-unfixed $(CALICO_NODE_IMAGE)
 
 PHONY: log
 log:
@@ -115,8 +156,6 @@ log:
 	@echo "ARCH=$(ARCH)"
 	@echo "TAG=$(TAG:$(BUILD_META)=)"
 	@echo "REPO=$(REPO)"
-	@echo "REGISTRY_IMAGE=$(REGISTRY_IMAGE)"
-	@echo "METADATA_FILE=$(METADATA_FILE)"
 	@echo "BUILD_META=$(BUILD_META)"
 	@echo "UNAME_M=$(UNAME_M)"
 	@echo "META_LABELS=$(META_LABELS)"
