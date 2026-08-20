@@ -66,6 +66,42 @@ image-build:
 		--load \
 		.
 
+.PHONY: build-calicoctl
+build-calicoctl:
+	docker buildx build --no-cache \
+		--platform=$(ARCH) \
+		--pull \
+		--target calico_ctl_slim \
+		--build-arg TAG=$(TAG:$(BUILD_META)=) \
+		--tag $(REPO)/hardened-calico-ctl:$(TAG) \
+		--tag $(REPO)/hardened-calico-ctl:$(TAG)-$(ARCH) \
+		--load \
+		.
+
+.PHONY: build-typha
+build-typha:
+	docker buildx build --no-cache \
+		--platform=$(ARCH) \
+		--pull \
+		--target calico_typha_slim \
+		--build-arg TAG=$(TAG:$(BUILD_META)=) \
+		--tag $(REPO)/hardened-calico-typha:$(TAG) \
+		--tag $(REPO)/hardened-calico-typha:$(TAG)-$(ARCH) \
+		--load \
+		.
+
+.PHONY: build-pod2daemon-flexvol
+build-pod2daemon-flexvol:
+	docker buildx build --no-cache \
+		--platform=$(ARCH) \
+		--pull \
+		--target calico_pod2daemon_slim \
+		--build-arg TAG=$(TAG:$(BUILD_META)=) \
+		--tag $(REPO)/hardened-calico-pod2daemon-flexvol:$(TAG) \
+		--tag $(REPO)/hardened-calico-pod2daemon-flexvol:$(TAG)-$(ARCH) \
+		--load \
+		.
+
 .PHONY: push-image
 push-image: $(BUILDDIR) | buildx-machine
 	docker buildx build \

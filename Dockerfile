@@ -67,7 +67,36 @@ RUN go-assert-static.sh bin/*
 RUN if [ "${ARCH}" = "amd64" ]; then go-assert-boring.sh bin/*; fi
 RUN install -s bin/* /usr/local/bin
 RUN calicoctl --version
+
+FROM runtime_rootfs AS calico_ctl_slim
+COPY --from=calico_ctl /go/src/github.com/projectcalico/calico/LICENSE.md /licenses/LICENSE
+COPY --from=calico_ctl /usr/local/bin/calicoctl /usr/bin/calicoctl
+ENV CALICO_CTL_CONTAINER=TRUE
+ENTRYPOINT ["/usr/bin/calicoctl"]
 ### END CALICOCTL #####
+
+### BEGIN CALICO TYPHA ###
+FROM builder AS calico_typha
+ARG ARCH
+ARG TAG=v3.32.1
+ARG GOEXPERIMENT
+WORKDIR $GOPATH/src/github.com/projectcalico/calico/typha
+RUN GO_LDFLAGS="-linkmode=external \
+    -X github.com/projectcalico/calico/pkg/buildinfo.Version=${TAG} \
+    -X github.com/projectcalico/calico/pkg/buildinfo.GitRevision=$(git rev-parse HEAD) \
+    -X github.com/projectcalico/calico/pkg/buildinfo.BuildDate=$(date -u +%FT%T%z)" \
+    go-build-static.sh -buildvcs=false -gcflags=-trimpath=${GOPATH}/src -o bin/calico-typha ./cmd/calico-typha/
+RUN go-assert-static.sh bin/calico-typha
+RUN if [ "${ARCH}" = "amd64" ]; then go-assert-boring.sh bin/calico-typha; fi
+RUN install -s bin/calico-typha /usr/local/bin/
+
+FROM runtime_rootfs AS calico_typha_slim
+COPY --from=calico_typha /go/src/github.com/projectcalico/calico/LICENSE.md /licenses/LICENSE
+COPY --from=calico_typha /usr/local/bin/calico-typha /usr/bin/calico-typha
+COPY --from=calico_typha /go/src/github.com/projectcalico/calico/docker/calico/typha.cfg /etc/calico/typha.cfg
+USER 999
+CMD ["/usr/bin/calico-typha"]
+### END CALICO TYPHA #####
 
 
 ### BEGIN CALICO CNI ###
@@ -132,7 +161,28 @@ RUN go-build-static.sh -buildvcs=false -gcflags=-trimpath=${GOPATH}/src -o bin/f
 RUN go-assert-static.sh bin/*
 RUN install -m 0755 flexvol/docker-image/flexvol.sh /usr/local/bin/
 RUN install -D -s bin/flexvoldriver /usr/local/bin/flexvol/flexvoldriver
+
+FROM runtime_rootfs AS calico_pod2daemon_slim
+COPY --from=bci /bin/bash /bin/bash
+COPY --from=bci /usr/bin/chmod /usr/bin/chmod
+COPY --from=bci /usr/bin/cp /usr/bin/cp
+COPY --from=bci /usr/bin/echo /usr/bin/echo
+COPY --from=bci /usr/bin/ls /usr/bin/ls
+COPY --from=bci /usr/bin/mv /usr/bin/mv
+COPY --from=bci /usr/bin/rm /usr/bin/rm
+COPY --from=bci /lib64/libacl.so.1 /lib64/libacl.so.1
+COPY --from=bci /lib64/libattr.so.1 /lib64/libattr.so.1
+COPY --from=bci /lib64/libcap.so.2 /lib64/libcap.so.2
+COPY --from=bci /lib64/libpcre2-8.so.0 /lib64/libpcre2-8.so.0
+COPY --from=bci /lib64/libreadline.so.8 /lib64/libreadline.so.8
+COPY --from=bci /lib64/libselinux.so.1 /lib64/libselinux.so.1
+COPY --from=bci /lib64/libtinfo.so.6 /lib64/libtinfo.so.6
+COPY --from=calico_pod2daemon /go/src/github.com/projectcalico/calico/LICENSE.md /licenses/LICENSE
+COPY --from=calico_pod2daemon /usr/local/bin/flexvol/flexvoldriver /usr/local/bin/flexvol
+COPY --from=calico_pod2daemon /usr/local/bin/flexvol.sh /usr/local/bin/flexvol.sh
+ENTRYPOINT ["/usr/local/bin/flexvol.sh"]
 ### END CALICO POD2DAEMON #####
+
 
 ### BEGIN CALICO KUBE-CONTROLLERS ###
 FROM builder AS calico_kubecontrollers
