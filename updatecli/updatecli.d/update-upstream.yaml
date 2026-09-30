@@ -54,6 +54,38 @@ sources:
       matchpattern: 'K8S_VERSION=v[0-9A-Za-z.-]+'
     transformers:
       - trimprefix: 'K8S_VERSION=v'
+  envoy_gateway_version:
+    name: Get upstream Envoy Gateway version
+    kind: file
+    dependson:
+      - tag
+    spec:
+      file: 'https://raw.githubusercontent.com/{{ .scm.upstream.owner }}/{{ .scm.upstream.repository }}/{{ source "tag" }}/third_party/envoy-gateway/Makefile'
+      matchpattern: 'ENVOY_GATEWAY_VERSION=[^[:space:]]+'
+    transformers:
+      - trimprefix: 'ENVOY_GATEWAY_VERSION='
+  envoy_ratelimit_version:
+    name: Get upstream Envoy Ratelimit version
+    kind: file
+    dependson:
+      - tag
+    spec:
+      file: 'https://raw.githubusercontent.com/{{ .scm.upstream.owner }}/{{ .scm.upstream.repository }}/{{ source "tag" }}/third_party/envoy-ratelimit/Makefile'
+      matchpattern: 'ENVOY_RATELIMIT_VERSION=[^[:space:]]+'
+    transformers:
+      - trimprefix: 'ENVOY_RATELIMIT_VERSION='
+  envoybinary_image:
+    name: Get upstream Envoy binary image
+    kind: file
+    dependson:
+      - tag
+    spec:
+      file: 'https://raw.githubusercontent.com/{{ .scm.upstream.owner }}/{{ .scm.upstream.repository }}/{{ source "tag" }}/third_party/envoy-proxy/Makefile'
+      matchpattern: 'ENVOYBINARY_IMAGE[[:space:]]*\?=[[:space:]]*[^[:space:]]+'
+    transformers:
+      - findsubmatch:
+          pattern: 'ENVOYBINARY_IMAGE[[:space:]]*\?=[[:space:]]*([^[:space:]]+)'
+          captureindex: 1
 targets:
   calico_go_build_image:
     name: 'Pin Calico go-build image for upstream version {{ source "tag" }}'
@@ -64,6 +96,33 @@ targets:
       file: Dockerfile
       matchpattern: '(?m)^ARG CALICO_GO_BUILD_IMAGE=.*$'
       replacepattern: 'ARG CALICO_GO_BUILD_IMAGE=calico/go-build:{{ source "go_version" }}-llvm{{ source "llvm_version" }}-k8s{{ source "k8s_version" }}'
+  envoy_gateway_version:
+    name: 'Pin Envoy Gateway version for upstream version {{ source "tag" }}'
+    kind: file
+    scmid: default
+    disablesourceinput: true
+    spec:
+      file: Dockerfile
+      matchpattern: '(?m)^ARG ENVOY_GATEWAY_VERSION=.*$'
+      replacepattern: 'ARG ENVOY_GATEWAY_VERSION={{ source "envoy_gateway_version" }}'
+  envoy_ratelimit_version:
+    name: 'Pin Envoy Ratelimit version for upstream version {{ source "tag" }}'
+    kind: file
+    scmid: default
+    disablesourceinput: true
+    spec:
+      file: Dockerfile
+      matchpattern: '(?m)^ARG ENVOY_RATELIMIT_VERSION=.*$'
+      replacepattern: 'ARG ENVOY_RATELIMIT_VERSION={{ source "envoy_ratelimit_version" }}'
+  envoybinary_image:
+    name: 'Pin Envoy binary image for upstream version {{ source "tag" }}'
+    kind: file
+    scmid: default
+    disablesourceinput: true
+    spec:
+      file: Dockerfile
+      matchpattern: '(?m)^ARG ENVOYBINARY_IMAGE=.*$'
+      replacepattern: 'ARG ENVOYBINARY_IMAGE={{ source "envoybinary_image" }}'
   tagfile:
     name: 'Bump TAG to upstream version {{ source "tag" }}'
     kind: file
