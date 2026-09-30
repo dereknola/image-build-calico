@@ -3,6 +3,9 @@ ARG BCI_RUNTIME_IMAGE=registry.suse.com/bci/bci-minimal:16.0-18.11@sha256:1dc0f4
 ARG GO_IMAGE=rancher/hardened-build-base:v1.27.1b1
 ARG CNI_IMAGE_VERSION=v1.9.1-build20260903
 ARG CNI_IMAGE=rancher/hardened-cni-plugins:${CNI_IMAGE_VERSION}
+ARG ENVOY_GATEWAY_VERSION=v1.9.1
+ARG ENVOY_RATELIMIT_VERSION=8fe6ea421048bdb2a8873d5f676b3f6eac76a997
+ARG ENVOYBINARY_IMAGE=quay.io/tigera/envoybinary:v1.39.1-9408962881
 # Upstream derives this tag in metadata.mk as $(GO_VERSION)-llvm$(LLVM_VERSION)-k8s$(K8S_VERSION:v%=%).
 # UpdateCLI tracks those values for the selected Calico TAG.
 ARG CALICO_GO_BUILD_IMAGE=calico/go-build:1.27.1-llvm21.1.8-k8s1.37.0
@@ -130,6 +133,78 @@ RUN ln -s calico /usr/bin/calicoctl && \
     ln -s calico /usr/bin/calico-ipam
 USER 10001:10001
 ENTRYPOINT ["/usr/bin/calico"]
+
+### BEGIN CALICO ENVOY ###
+FROM builder AS calico_envoy_gateway_artifacts
+ARG TARGET_ARCH
+ARG ENVOY_GATEWAY_VERSION
+ARG GOEXPERIMENT
+ENV GOEXPERIMENT=${GOEXPERIMENT}
+WORKDIR /tmp/envoy-gateway
+RUN curl -sSfL --retry 5 -o /tmp/envoy-gateway.tar.gz \
+    https://github.com/envoyproxy/gateway/archive/refs/tags/${ENVOY_GATEWAY_VERSION}.tar.gz && \
+    tar xzf /tmp/envoy-gateway.tar.gz --strip-components=1 -C . && \
+    rm /tmp/envoy-gateway.tar.gz
+RUN go-build-static.sh -buildvcs=false -trimpath \
+    -o /usr/local/bin/envoy-gateway ./cmd/envoy-gateway
+RUN go-assert-static.sh /usr/local/bin/envoy-gateway
+RUN if [ "${TARGET_ARCH}" = "amd64" ]; then \
+    go-assert-boring.sh /usr/local/bin/envoy-gateway; \
+    fi
+# BoringCrypto verification requires Go symbol data, so only strip afterward.
+RUN llvm-strip /usr/local/bin/envoy-gateway
+RUN mkdir -p /var/lib/eg
+
+FROM builder AS calico_envoy_ratelimit_artifacts
+ARG TARGET_ARCH
+ARG ENVOY_RATELIMIT_VERSION
+ARG GOEXPERIMENT
+ENV GOEXPERIMENT=${GOEXPERIMENT}
+WORKDIR /tmp/envoy-ratelimit
+RUN git init && \
+    git remote add origin https://github.com/envoyproxy/ratelimit.git && \
+    git fetch --depth=1 origin ${ENVOY_RATELIMIT_VERSION} && \
+    git checkout --detach FETCH_HEAD
+RUN go-build-static.sh -buildvcs=false -trimpath \
+    -o /usr/local/bin/ratelimit ./src/service_cmd
+RUN go-assert-static.sh /usr/local/bin/ratelimit
+RUN if [ "${TARGET_ARCH}" = "amd64" ]; then \
+    go-assert-boring.sh /usr/local/bin/ratelimit; \
+    fi
+# BoringCrypto verification requires Go symbol data, so only strip afterward.
+RUN llvm-strip /usr/local/bin/ratelimit
+
+FROM runtime_rootfs AS calico-envoy-gateway-image
+LABEL org.opencontainers.image.url="https://github.com/rancher/image-build-calico"
+LABEL org.opencontainers.image.source="https://github.com/projectcalico/calico"
+LABEL org.opencontainers.image.title="Calico Envoy Gateway"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+COPY --from=calico_envoy_gateway_artifacts /usr/local/bin/envoy-gateway /usr/local/bin/envoy-gateway
+COPY --chown=65532:65532 --from=calico_envoy_gateway_artifacts /var/lib/eg /var/lib/eg
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/envoy-gateway"]
+
+FROM ${ENVOYBINARY_IMAGE} AS calico_envoy_proxy_artifacts
+
+FROM runtime_rootfs AS calico-envoy-proxy-image
+LABEL org.opencontainers.image.url="https://github.com/rancher/image-build-calico"
+LABEL org.opencontainers.image.source="https://github.com/projectcalico/calico"
+LABEL org.opencontainers.image.title="Calico Envoy Proxy"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+COPY --from=calico_envoy_proxy_artifacts /etc/envoy/envoy.yaml /etc/envoy/envoy.yaml
+COPY --from=calico_envoy_proxy_artifacts /usr/local/bin/envoy /usr/local/bin/envoy
+EXPOSE 10000
+ENTRYPOINT ["/usr/local/bin/envoy"]
+CMD ["-c", "/etc/envoy/envoy.yaml"]
+
+FROM runtime_rootfs AS calico-envoy-ratelimit-image
+LABEL org.opencontainers.image.url="https://github.com/rancher/image-build-calico"
+LABEL org.opencontainers.image.source="https://github.com/projectcalico/calico"
+LABEL org.opencontainers.image.title="Calico Envoy Ratelimit"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+COPY --from=calico_envoy_ratelimit_artifacts /usr/local/bin/ratelimit /bin/ratelimit
+ENTRYPOINT ["/bin/ratelimit"]
+### END CALICO ENVOY ###
 
 # Calico BPF sources require the glibc headers and LLVM toolchain provided by the upstream release's go-build image.
 FROM ${CALICO_GO_BUILD_IMAGE} AS calico_bpf_artifacts
